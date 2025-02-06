@@ -81,6 +81,10 @@ spec:
                           (in CIDR notation) within a network range, a mask, or leave this field blank to use a default range.
                           This setting is permanent.
                         type: string
+                      secondaryRangeName:
+                        description: SecondaryRangeName is the name of the secondary
+                          range for the cluster pod IP addresses.
+                        type: string
                     type: object
                   privateCluster:
                     description: PrivateCluster defines the private cluster spec.
@@ -120,6 +124,10 @@ spec:
                           CidrBlock is where cluster services will be assigned an IP address from this IP address range. Enter a range
                           (in CIDR notation) within a network range, a mask, or leave this field blank to use a default range.
                           This setting is permanent.
+                        type: string
+                      secondaryRangeName:
+                        description: SecondaryRangeName is the name of the secondary
+                          range for the cluster service addresses.
                         type: string
                     type: object
                   useIPAliases:
@@ -274,6 +282,10 @@ spec:
               currentVersion:
                 description: CurrentVersion shows the current version of the GKE control
                   plane.
+                type: string
+              identityServiceServer:
+                description: IdentityServiceServer indicates when the identity service
+                  is enabled, the server for external authentication.
                 type: string
               initialized:
                 description: |-

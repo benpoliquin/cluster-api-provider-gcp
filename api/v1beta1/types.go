@@ -107,6 +107,23 @@ type Network struct {
 	APIInternalForwardingRule *string `json:"apiInternalForwardingRule,omitempty"`
 }
 
+// DatapathProvider selects the implementation of the Kubernetes networking
+// model for service resolution and network policy enforcement.
+type DatapathProvider string
+
+// https://pkg.go.dev/cloud.google.com/go/container@v1.40.0/apiv1/containerpb#DatapathProvider
+const (
+	// DatapathProviderUnspecified default value.
+	DatapathProviderUnspecified DatapathProvider = DatapathProvider("UNSPECIFIED")
+	// DatapathProviderLegacyDatapath uses the IPTables implementation based on kube-proxy.
+	DatapathProviderLegacyDatapath DatapathProvider = DatapathProvider("LEGACY_DATAPATH")
+	// DatapathProviderAdvancedDatapath uses the eBPF based GKE Dataplane V2
+	// with additional features.
+	// See the [GKE Dataplane V2 documentation](https://cloud.google.com/kubernetes-engine/docs/how-to/dataplane-v2)
+	// for more.
+	DatapathProviderAdvancedDatapath DatapathProvider = DatapathProvider("ADVANCED_DATAPATH")
+)
+
 // NetworkSpec encapsulates all things related to a GCP network.
 type NetworkSpec struct {
 	// Name is the name of the network to be used.
@@ -147,6 +164,15 @@ type NetworkSpec struct {
 	// +kubebuilder:default:=1460
 	// +optional
 	Mtu int64 `json:"mtu,omitempty"`
+
+	// The desired datapath provider for this cluster. By default, uses the
+	// IPTables-based kube-proxy implementation (DatapathProviderLegacyDatapath).
+	// +optional
+	DatapathProvider *DatapathProvider `json:"datapathProvider,omitempty"`
+
+	// EnableIntraNodeVisibility is whether Intra-node visibility is enabled for this cluster.
+	// +optional
+	EnableIntraNodeVisibility *bool `json:"enableIntraNodeVisibility,omitempty"`
 }
 
 // LoadBalancerType defines the Load Balancer that should be created.

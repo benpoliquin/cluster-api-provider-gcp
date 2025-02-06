@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"strings"
 
+	"sigs.k8s.io/cluster-api-provider-gcp/api/v1beta1"
 	"sigs.k8s.io/cluster-api-provider-gcp/cloud/scope"
 	"sigs.k8s.io/cluster-api-provider-gcp/cloud/services/shared"
 
@@ -31,6 +32,12 @@ import (
 	"github.com/googleapis/gax-go/v2/apierror"
 	"github.com/pkg/errors"
 	"google.golang.org/grpc/codes"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/utils/ptr"
 	infrav1exp "sigs.k8s.io/cluster-api-provider-gcp/exp/api/v1beta1"
 	"sigs.k8s.io/cluster-api-provider-gcp/util/reconciler"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
@@ -155,7 +162,7 @@ func (s *Service) Reconcile(ctx context.Context) (ctrl.Result, error) {
 	conditions.MarkFalse(s.scope.ConditionSetter(), infrav1exp.GKEControlPlaneUpdatingCondition, infrav1exp.GKEControlPlaneUpdatedReason, clusterv1.ConditionSeverityInfo, "")
 
 	// Reconcile kubeconfig
-	err = s.reconcileKubeconfig(ctx, cluster, &log)
+	kubeConfig, err := s.reconcileKubeconfig(ctx, cluster, &log)
 	if err != nil {
 		log.Error(err, "Failed to reconcile CAPI kubeconfig")
 		return ctrl.Result{}, err
@@ -163,6 +170,11 @@ func (s *Service) Reconcile(ctx context.Context) (ctrl.Result, error) {
 	err = s.reconcileAdditionalKubeconfigs(ctx, cluster, &log)
 	if err != nil {
 		log.Error(err, "Failed to reconcile additional kubeconfig")
+		return ctrl.Result{}, err
+	}
+
+	err = s.reconcileIdentityService(ctx, kubeConfig, &log)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -262,6 +274,7 @@ func (s *Service) createCluster(ctx context.Context, log *logr.Logger) error {
 		IdentityServiceConfig: &containerpb.IdentityServiceConfig{
 			Enabled: s.scope.GCPManagedControlPlane.Spec.EnableIdentityService,
 		},
+		NetworkConfig: s.createNetworkConfig(),
 		ReleaseChannel: &containerpb.ReleaseChannel{
 			Channel: convertToSdkReleaseChannel(s.scope.GCPManagedControlPlane.Spec.ReleaseChannel),
 		},
@@ -279,6 +292,16 @@ func (s *Service) createCluster(ctx context.Context, log *logr.Logger) error {
 		if cn.UseIPAliases {
 			cluster.IpAllocationPolicy = &containerpb.IPAllocationPolicy{}
 			cluster.IpAllocationPolicy.UseIpAliases = cn.UseIPAliases
+			cluster.IpAllocationPolicy.ClusterIpv4CidrBlock = cn.Pod.CidrBlock
+			cluster.IpAllocationPolicy.ServicesIpv4CidrBlock = cn.Service.CidrBlock
+
+			if cn.Pod.SecondaryRangeName != "" {
+				cluster.IpAllocationPolicy.ClusterSecondaryRangeName = cn.Pod.SecondaryRangeName
+			}
+
+			if cn.Service.SecondaryRangeName != "" {
+				cluster.IpAllocationPolicy.ServicesSecondaryRangeName = cn.Service.SecondaryRangeName
+			}
 		}
 		if cn.PrivateCluster != nil {
 			cluster.PrivateClusterConfig = &containerpb.PrivateClusterConfig{}
@@ -295,10 +318,8 @@ func (s *Service) createCluster(ctx context.Context, log *logr.Logger) error {
 			cluster.PrivateClusterConfig.MasterIpv4CidrBlock = cn.PrivateCluster.ControlPlaneCidrBlock
 			cluster.ControlPlaneEndpointsConfig.IpEndpointsConfig.GlobalAccess = &cn.PrivateCluster.ControlPlaneGlobalAccess
 
-			cluster.NetworkConfig = &containerpb.NetworkConfig{
-				DefaultSnatStatus: &containerpb.DefaultSnatStatus{
-					Disabled: cn.PrivateCluster.DisableDefaultSNAT,
-				},
+			cluster.NetworkConfig.DefaultSnatStatus = &containerpb.DefaultSnatStatus{
+				Disabled: cn.PrivateCluster.DisableDefaultSNAT,
 			}
 		}
 	}
@@ -458,6 +479,16 @@ func (s *Service) checkDiffAndPrepareUpdate(existingCluster *containerpb.Cluster
 		log.V(2).Info("MonitoringService config update required", "current", existingCluster.GetMonitoringService(), "desired", s.scope.GCPManagedControlPlane.Spec.MonitoringService.String())
 	}
 
+	// IntraNodeVisibility
+	enableIntraNodeVisibility := ptr.Deref(s.scope.GCPManagedCluster.Spec.Network.EnableIntraNodeVisibility, false)
+	if existingCluster.GetNetworkConfig().GetEnableIntraNodeVisibility() != enableIntraNodeVisibility {
+		needUpdate = true
+		clusterUpdate.DesiredIntraNodeVisibilityConfig = &containerpb.IntraNodeVisibilityConfig{
+			Enabled: enableIntraNodeVisibility,
+		}
+		log.V(2).Info("IntraNodeVisibility config update required", "current", existingCluster.GetNetworkConfig().GetEnableIntraNodeVisibility(), "desired", enableIntraNodeVisibility)
+	}
+
 	// DesiredMasterAuthorizedNetworksConfig
 	// When desiredMasterAuthorizedNetworksConfig is nil, it means that the user wants to disable the feature.
 	desiredMasterAuthorizedNetworksConfig := convertToSdkMasterAuthorizedNetworksConfig(s.scope.GCPManagedControlPlane.Spec.MasterAuthorizedNetworksConfig)
@@ -469,6 +500,12 @@ func (s *Service) checkDiffAndPrepareUpdate(existingCluster *containerpb.Cluster
 	log.V(4).Info("Master authorized networks config update check", "current", existingCluster.GetControlPlaneEndpointsConfig().GetIpEndpointsConfig().GetAuthorizedNetworksConfig())
 	if desiredMasterAuthorizedNetworksConfig != nil {
 		log.V(4).Info("Master authorized networks config update check", "desired", desiredMasterAuthorizedNetworksConfig)
+	}
+
+	desiredEnableIdentityService := s.scope.GCPManagedControlPlane.Spec.EnableIdentityService
+	if desiredEnableIdentityService != existingCluster.GetIdentityServiceConfig().GetEnabled() {
+		needUpdate = true
+		clusterUpdate.DesiredIdentityServiceConfig = &containerpb.IdentityServiceConfig{Enabled: desiredEnableIdentityService}
 	}
 
 	updateClusterRequest := containerpb.UpdateClusterRequest{
@@ -505,4 +542,95 @@ func compareMasterAuthorizedNetworksConfig(a, b *containerpb.MasterAuthorizedNet
 		return false
 	}
 	return true
+}
+
+// reconcileIdentityService set the identity service server in the status of the GCPManagedControlPlane.
+func (s *Service) reconcileIdentityService(ctx context.Context, kubeConfig clientcmd.ClientConfig, log *logr.Logger) error {
+	identityServiceServer, err := s.getIdentityServiceServer(ctx, kubeConfig)
+	if err != nil {
+		err = fmt.Errorf("failed to retrieve identity service: %w", err)
+		log.Error(err, "Failed to retrieve identity service server")
+		return err
+	}
+
+	s.scope.GCPManagedControlPlane.Status.IdentityServiceServer = identityServiceServer
+
+	return nil
+}
+
+// getIdentityServiceServer retrieve the server to use for authentication using the identity service.
+func (s *Service) getIdentityServiceServer(ctx context.Context, kubeConfig clientcmd.ClientConfig) (string, error) {
+	/*
+		# Example of the ClientConfig (see https://cloud.google.com/kubernetes-engine/docs/how-to/oidc#configuring_on_a_cluster):
+		apiVersion: authentication.gke.io/v2alpha1
+		kind: ClientConfig
+		metadata:
+			name: default
+			namespace: kube-public
+		spec:
+			server: https://192.168.0.1:6443
+	*/
+
+	if !s.scope.GCPManagedControlPlane.Spec.EnableIdentityService {
+		// Identity service is not enabled, skipping
+		return "", nil
+	}
+
+	if kubeConfig == nil {
+		return "", errors.New("provided kubernetes configuration is nil")
+	}
+
+	config, err := kubeConfig.ClientConfig()
+	if err != nil {
+		return "", err
+	}
+
+	dynamicClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		return "", err
+	}
+
+	resourceID := schema.GroupVersionResource{
+		Group:    "authentication.gke.io",
+		Version:  "v2alpha1",
+		Resource: "clientconfigs",
+	}
+
+	unstructured, err := dynamicClient.Resource(resourceID).Namespace("kube-public").Get(ctx, "default", metav1.GetOptions{})
+	if err != nil {
+		return "", err
+	}
+
+	gkeClientConfig := struct {
+		Spec struct {
+			Server string `json:"server"`
+		} `json:"spec"`
+	}{}
+	err = runtime.DefaultUnstructuredConverter.FromUnstructured(unstructured.Object, &gkeClientConfig)
+
+	return gkeClientConfig.Spec.Server, err
+}
+
+func (s *Service) createNetworkConfig() *containerpb.NetworkConfig {
+	return &containerpb.NetworkConfig{
+		EnableIntraNodeVisibility: ptr.Deref(s.scope.GCPManagedCluster.Spec.Network.EnableIntraNodeVisibility, false),
+		DatapathProvider:          convertToSdkDatapathProvider(s.scope.GCPManagedCluster.Spec.Network.DatapathProvider),
+	}
+}
+
+func convertToSdkDatapathProvider(datapath *v1beta1.DatapathProvider) containerpb.DatapathProvider {
+	if datapath == nil {
+		return containerpb.DatapathProvider_DATAPATH_PROVIDER_UNSPECIFIED
+	}
+
+	switch *datapath {
+	case v1beta1.DatapathProviderUnspecified:
+		return containerpb.DatapathProvider_DATAPATH_PROVIDER_UNSPECIFIED
+	case v1beta1.DatapathProviderLegacyDatapath:
+		return containerpb.DatapathProvider_LEGACY_DATAPATH
+	case v1beta1.DatapathProviderAdvancedDatapath:
+		return containerpb.DatapathProvider_ADVANCED_DATAPATH
+	}
+
+	return containerpb.DatapathProvider_DATAPATH_PROVIDER_UNSPECIFIED
 }

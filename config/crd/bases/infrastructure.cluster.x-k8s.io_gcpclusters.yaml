@@ -157,6 +157,15 @@ spec:
 
                       Defaults to true.
                     type: boolean
+                  datapathProvider:
+                    description: |-
+                      The desired datapath provider for this cluster. By default, uses the
+                      IPTables-based kube-proxy implementation (DatapathProviderLegacyDatapath).
+                    type: string
+                  enableIntraNodeVisibility:
+                    description: EnableIntraNodeVisibility is whether Intra-node visibility
+                      is enabled for this cluster.
+                    type: boolean
                   hostProject:
                     description: HostProject is the name of the project hosting the
                       shared VPC network resources.

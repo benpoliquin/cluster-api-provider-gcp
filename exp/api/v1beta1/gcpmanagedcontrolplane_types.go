@@ -66,6 +66,10 @@ type ClusterNetworkPod struct {
 	// This setting is permanent.
 	// +optional
 	CidrBlock string `json:"cidrBlock,omitempty"`
+
+	// SecondaryRangeName is the name of the secondary range for the cluster pod IP addresses.
+	// +optional
+	SecondaryRangeName string `json:"secondaryRangeName,omitempty"`
 }
 
 // ClusterNetworkService defines the range of CIDRBlock list from where it gets the IP address.
@@ -75,6 +79,10 @@ type ClusterNetworkService struct {
 	// This setting is permanent.
 	// +optional
 	CidrBlock string `json:"cidrBlock,omitempty"`
+
+	// SecondaryRangeName is the name of the secondary range for the cluster service addresses.
+	// +optional
+	SecondaryRangeName string `json:"secondaryRangeName,omitempty"`
 }
 
 // ClusterNetwork define the cluster network.
@@ -185,6 +193,10 @@ type GCPManagedControlPlaneStatus struct {
 	// CurrentVersion shows the current version of the GKE control plane.
 	// +optional
 	CurrentVersion string `json:"currentVersion,omitempty"`
+
+	// IdentityServiceServer indicates when the identity service is enabled, the server for external authentication.
+	// +optional
+	IdentityServiceServer string `json:"identityServiceServer,omitempty"`
 }
 
 // +kubebuilder:object:root=true
